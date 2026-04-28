@@ -80,7 +80,7 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
         .map_err(|e| format!("ReadFile Failed: {}", e))?;
 
         // DEBUG CODE TO SEE THE DATA READ
-        /* 
+        /*
         let actual_data = &read_data_buffer[..bytes_read as usize];
 
         println!("Bytes read (Hex):");
@@ -95,8 +95,24 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
         }
         println!(); // Final newline
         */
-        print!("Successfully read first record. Reading Byte Offset ...");
-        
+        print!(
+            "Successfully read first record. Reading byte offset and then reading attributes ..."
+        );
+
+        let offset_bytes: &[u8] = &read_data_buffer[0x14..0x16]; // take a 2-byte slice
+        let attribute_offset =
+            u16::from_le_bytes([read_data_buffer[0x14], read_data_buffer[0x15]]) as usize;
+
+            
+        let first_attribute: &[u8] = &read_data_buffer[attribute_offset as usize..];
+        let attr_type: u32 = u32::from_le_bytes(first_attribute[0..4].try_into().unwrap());
+        let total_attr_len: u32 = u32::from_le_bytes(first_attribute[4..8].try_into().unwrap());
+
+        let content_offset: usize =
+            u16::from_le_bytes(first_attribute[0x14..0x16].try_into().unwrap()) as usize;
+
+        let content: &[u8] = &first_attribute[content_offset..];
+        println!("Content (Hex): {:02X?}", content);
 
         return Ok(drive_handle);
     }
