@@ -100,19 +100,78 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
         );
 
         let offset_bytes: &[u8] = &read_data_buffer[0x14..0x16]; // take a 2-byte slice
-        let attribute_offset =
+        let first_attribute_offset =
             u16::from_le_bytes([read_data_buffer[0x14], read_data_buffer[0x15]]) as usize;
 
-            
-        let first_attribute: &[u8] = &read_data_buffer[attribute_offset as usize..];
-        let attr_type: u32 = u32::from_le_bytes(first_attribute[0..4].try_into().unwrap());
-        let total_attr_len: u32 = u32::from_le_bytes(first_attribute[4..8].try_into().unwrap());
+        let first_attribute: &[u8] = &read_data_buffer[first_attribute_offset as usize..];
+        let first_attr_type: u32 = u32::from_le_bytes(first_attribute[0..4].try_into().unwrap());
+        let first_attr_total_len: u32 =
+            u32::from_le_bytes(first_attribute[4..8].try_into().unwrap());
 
-        let content_offset: usize =
+        let first_attr_content_offset: usize =
             u16::from_le_bytes(first_attribute[0x14..0x16].try_into().unwrap()) as usize;
 
-        let content: &[u8] = &first_attribute[content_offset..];
-        println!("Content (Hex): {:02X?}", content);
+        let first_attr_content: &[u8] = &first_attribute[first_attr_content_offset..];
+
+        println!("First attribute length: {}",first_attr_total_len);
+
+        let attr_offset_bytes: &[u8] = &read_data_buffer[20..22];
+        let z_attr_offset: u16 = u16::from_le_bytes(attr_offset_bytes.try_into().unwrap());
+
+
+        // Now that we have the first attribute we can start a loop and go through every other attribute.
+        let mut is_crawling: bool = true;
+        let mut crawl_count: u32 = 0;
+        let mut current_offset: u32 = u16::from_le_bytes(attr_offset_bytes.try_into().unwrap()) as u32;
+
+        println!("Beginning attribute crawl");
+
+        while is_crawling {
+            println!("Crawl no.{}", crawl_count);
+
+            if crawl_count == 0 {
+                // first time crawling this record
+                current_offset = z_attr_offset as u32;
+            }
+
+            let start: usize = current_offset as usize;
+            let end: usize = (current_offset + 4) as usize;
+
+            // read the type ID which is 4 bytes
+            let type_id_bytes: &[u8] = &read_data_buffer[start..end];
+            let type_id: u32 = u32::from_le_bytes(type_id_bytes.try_into().unwrap());
+            if type_id == 0xFFFFFFFF {
+                // NTFS STOP telling us that there are no more attributes
+                // so reset the crawl count and break.
+                crawl_count = 0;
+                is_crawling = false;
+                break;
+            }
+
+            // now we need the length of this attribute (stored in bytes 4-8)
+            // we have the start of the attribute and the end of it
+            // so attribute_length = take the next 4 bytes from start_of_attr
+            let attr_len_bytes_start: usize = (current_offset + 4) as usize;
+            let attr_len_bytes_end: usize = (current_offset + 8) as usize;
+            let attr_len_bytes: &[u8] = &read_data_buffer[attr_len_bytes_start..attr_len_bytes_end];
+            let attr_len: u32 = u32::from_le_bytes(attr_len_bytes.try_into().unwrap());
+
+            // if corrupted data
+            if attr_len == 0 {
+                crawl_count = 0;
+                is_crawling = false;
+                break;
+            }
+
+            // now we can find the attribute we're looking for
+            // for testing purposes lets find filename (0x30)
+            if type_id == 0x30 {
+                println!("Filename attribute found");
+            }
+
+            current_offset += attr_len;
+            crawl_count += 1;
+        }
 
         return Ok(drive_handle);
     }
