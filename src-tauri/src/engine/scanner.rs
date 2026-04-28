@@ -167,6 +167,30 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
             // for testing purposes lets find filename (0x30)
             if type_id == 0x30 {
                 println!("Filename attribute found");
+                // we need to know where the content is stored
+                // the offset to content is stored in bytes 0x14 and 0x15
+                // TODO: replace all the weird "_bytes" bullshit with this much cleaner syntax
+                let filename_content_offset: u16 = u16::from_le_bytes([
+                    read_data_buffer[start + 0x14],
+                    read_data_buffer[start + 0x15]
+                ]);
+                println!("$FILE_NAME content offset: {}", filename_content_offset);
+
+                // instead of "jumping" the current_offset var
+                // which could have weird consenquences we will just create new variables
+                // since the offset is relative to the header, and type_id is at 0x00 of the header
+                // we can just use type_id's row number ("start" variable) for this calculation
+                let file_name_struct_start_row: u32 = (start as u32 + filename_content_offset as u32);
+                println!("$FILE_NAME struct start row: {}", file_name_struct_start_row);
+                // now we need to find the filename length, which is located
+                // at offset 0x40 (64) from $FILE_NAME struct start
+                let file_name_byte_location: usize = (file_name_struct_start_row + 0x40) as usize;
+                println!("$FILE_NAME byte location: {}", file_name_byte_location);
+
+                let file_name_length: u8 = u8::from_le_bytes([
+                    read_data_buffer[file_name_byte_location]
+                ]);
+                println!("$FILE_NAME length found: {}",file_name_length);
             }
 
             current_offset += attr_len;
