@@ -10,82 +10,41 @@ use windows::Win32::System::IO::DeviceIoControl;
 
 const HANDLE_PATH: PCWSTR = windows::core::w!("\\\\.\\C:"); // \\.\C:
 
-fn get_filename_attribute(data_buffer: Vec<u8>, start_offset: u32) {
-    let mut is_crawling: bool = true;
-    let mut crawl_count: u32 = 0;
-    let mut current_offset: u32 = start_offset;
+#[repr(C,packed)]
+pub struct AttributeHeader {
+    pub type_id: u32, // 0x00
+    pub length: u32, // 0x04
+    pub non_resident: u8, // 0x08
+    pub name_length: u8, // 0x09
+    pub name_offset: u16, // 0x0A
+    pub flags: u16, // 0x0C
+    pub attribute_id: u16, // 0x0E
+    pub content_length: u32, // 0x10 (Resident Headers from here)
+    pub content_offset: u16, // 0x14
+    pub indexed_flag: u8, // 0x16
+    pub padding: u8 // 0x17
+}
 
-    while is_crawling {
-            println!("Crawl no.{}", crawl_count);
+fn get_filename_attribute(data: Vec<u8>, start_offset: u32) {
+    let mut current_offset = start_offset as usize;
 
-            if crawl_count == 0 {
-                // first time crawling this record
-                current_offset = start_offset as u32;
-            }
+    while current_offset + std::mem::size_of::<AttributeHeader>() <= data.len() {
+        let header = unsafe {
+            &*(data.as_ptr().add(current_offset) as *const AttributeHeader)
+        };
 
-            let start: usize = current_offset as usize;
-            let end: usize = (current_offset + 4) as usize;
+        match header.type_id {
+            0xFFFFFFFF => break,
+            0x30 => {
+                println!("Found $FILE_NAME at offset {}", current_offset);
+            },
+            _ => (), // ignore other attribs
+        }
 
-            // read the type ID which is 4 bytes
-            let type_id_bytes: &[u8] = &data_buffer[start..end];
-            let type_id: u32 = u32::from_le_bytes(type_id_bytes.try_into().unwrap());
-            if type_id == 0xFFFFFFFF {
-                // NTFS STOP telling us that there are no more attributes
-                // so reset the crawl count and break.
-                crawl_count = 0;
-                is_crawling = false;
-                break;
-            }
+        if header.length == 0 {break;}
 
-            // now we need the length of this attribute (stored in bytes 4-8)
-            // we have the start of the attribute and the end of it
-            // so attribute_length = take the next 4 bytes from start_of_attr
-            let attr_len_bytes_start: usize = (current_offset + 4) as usize;
-            let attr_len_bytes_end: usize = (current_offset + 8) as usize;
-            let attr_len_bytes: &[u8] = &data_buffer[attr_len_bytes_start..attr_len_bytes_end];
-            let attr_len: u32 = u32::from_le_bytes(attr_len_bytes.try_into().unwrap());
-
-            // if corrupted data
-            if attr_len == 0 {
-                crawl_count = 0;
-                is_crawling = false;
-                break;
-            }
-
-            // now we can find the attribute we're looking for
-            // for testing purposes lets find filename (0x30)
-            if type_id == 0x30 {
-                println!("Filename attribute found");
-                // we need to know where the content is stored
-                // the offset to content is stored in bytes 0x14 and 0x15
-                // TODO: replace all the weird "_bytes" bullshit with this much cleaner syntax
-                let filename_content_offset: u16 = u16::from_le_bytes([
-                    data_buffer[start + 0x14],
-                    data_buffer[start + 0x15]
-                ]);
-                println!("$FILE_NAME content offset: {}", filename_content_offset);
-
-                // instead of "jumping" the current_offset var
-                // which could have weird consenquences we will just create new variables
-                // since the offset is relative to the header, and type_id is at 0x00 of the header
-                // we can just use type_id's row number ("start" variable) for this calculation
-                let file_name_struct_start_row: u32 = (start as u32 + filename_content_offset as u32);
-                println!("$FILE_NAME struct start row: {}", file_name_struct_start_row);
-                // now we need to find the filename length, which is located
-                // at offset 0x40 (64) from $FILE_NAME struct start
-                let file_name_byte_location: usize = (file_name_struct_start_row + 0x40) as usize;
-                println!("$FILE_NAME byte location: {}", file_name_byte_location);
-
-                let file_name_length: u8 = u8::from_le_bytes([
-                    data_buffer[file_name_byte_location]
-                ]);
-                println!("$FILE_NAME length found: {}",file_name_length);
-            }
-
-            current_offset += attr_len;
-            crawl_count += 1;
-        }    
-
+        current_offset += header.length as usize;
+    }
 }
 
 pub fn open_volume_handle() -> Result<HANDLE, String> {
