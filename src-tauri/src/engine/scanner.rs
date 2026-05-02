@@ -10,38 +10,39 @@ use windows::Win32::System::IO::DeviceIoControl;
 
 const HANDLE_PATH: PCWSTR = windows::core::w!("\\\\.\\C:"); // \\.\C:
 
-#[repr(C,packed)]
+#[repr(C, packed)]
 pub struct AttributeHeader {
-    pub type_id: u32, // 0x00
-    pub length: u32, // 0x04
-    pub non_resident: u8, // 0x08
-    pub name_length: u8, // 0x09
-    pub name_offset: u16, // 0x0A
-    pub flags: u16, // 0x0C
-    pub attribute_id: u16, // 0x0E
+    pub type_id: u32,        // 0x00
+    pub length: u32,         // 0x04
+    pub non_resident: u8,    // 0x08
+    pub name_length: u8,     // 0x09
+    pub name_offset: u16,    // 0x0A
+    pub flags: u16,          // 0x0C
+    pub attribute_id: u16,   // 0x0E
     pub content_length: u32, // 0x10 (Resident Headers from here)
     pub content_offset: u16, // 0x14
-    pub indexed_flag: u8, // 0x16
-    pub padding: u8 // 0x17
+    pub indexed_flag: u8,    // 0x16
+    pub padding: u8,         // 0x17
 }
 
 fn get_filename_attribute(data: Vec<u8>, start_offset: u32) {
-    let mut current_offset = start_offset as usize;
+    let mut current_offset: usize = start_offset as usize;
 
     while current_offset + std::mem::size_of::<AttributeHeader>() <= data.len() {
-        let header = unsafe {
-            &*(data.as_ptr().add(current_offset) as *const AttributeHeader)
-        };
+        let header: &AttributeHeader =
+            unsafe { &*(data.as_ptr().add(current_offset) as *const AttributeHeader) };
 
         match header.type_id {
             0xFFFFFFFF => break,
             0x30 => {
                 println!("Found $FILE_NAME at offset {}", current_offset);
-            },
+            }
             _ => (), // ignore other attribs
         }
 
-        if header.length == 0 {break;}
+        if header.length == 0 {
+            break;
+        }
 
         current_offset += header.length as usize;
     }
@@ -120,22 +121,10 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
             "Successfully read first record. Reading byte offset and then reading attributes ..."
         );
 
-        let first_attribute_offset =
-            u16::from_le_bytes([read_data_buffer[0x14], read_data_buffer[0x15]]) as usize;
-
-        let first_attribute: &[u8] = &read_data_buffer[first_attribute_offset as usize..];
-        let first_attr_total_len: u32 =
-            u32::from_le_bytes(first_attribute[4..8].try_into().unwrap());
-
-
-
-        println!("First attribute length: {}",first_attr_total_len);
-
-        let attr_offset_bytes: &[u8] = &read_data_buffer[20..22];
-        let z_attr_offset: u16 = u16::from_le_bytes(attr_offset_bytes.try_into().unwrap());
+        let header: &AttributeHeader = &*(read_data_buffer.as_ptr() as *const AttributeHeader);
 
         println!("Beginning attribute crawl");
-        get_filename_attribute(read_data_buffer, z_attr_offset as u32);
+        get_filename_attribute(read_data_buffer, header.content_offset as u32);
 
         return Ok(drive_handle);
     }
