@@ -3,12 +3,13 @@ use std::ptr::read_unaligned;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING
 };
 use windows::Win32::System::Ioctl::{
     FSCTL_ENUM_USN_DATA, FSCTL_QUERY_USN_JOURNAL, MFT_ENUM_DATA_V0, USN_JOURNAL_DATA_V0,
 };
 use windows::Win32::System::IO::DeviceIoControl;
+use std::time::Instant;
 
 const HANDLE_PATH: PCWSTR = windows::core::w!("\\\\.\\C:"); // \\.\C:
 
@@ -20,7 +21,7 @@ pub fn scan_volume() -> anyhow::Result<()> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
+            FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_OVERLAPPED.0),
             None,
         )?
     };
@@ -47,8 +48,13 @@ pub fn scan_volume() -> anyhow::Result<()> {
         HighUsn: journal.NextUsn,
     };
 
-    let mut buffer = vec![0u8; 1024 * 1024];
-    let mut total_files = 0;
+    let mut buffer: Vec<u8> = vec![0u8; 8 * 1024 * 1024]; // 8mb
+    let mut total_files: u32 = 0;
+
+    println!("Starting scan ...");
+    let start_time: Instant = Instant::now();
+
+    let mut utf8_buffer: String = String::with_capacity(512);
 
     loop {
         let mut bytes_returned = 0;
@@ -91,7 +97,14 @@ pub fn scan_volume() -> anyhow::Result<()> {
                 ptr.add(name_off) as *const u16
             };
             let name_slice: &[u16] = unsafe { std::slice::from_raw_parts(name_ptr, name_len / 2) };
-            let name: String = String::from_utf16_lossy(name_slice);
+
+            utf8_buffer.clear();
+/* 
+            for result in std::char::decode_utf16(name_slice.iter().cloned()) {
+                utf8_buffer.push(result.unwrap_or(std::char::REPLACEMENT_CHARACTER));
+            }
+*/
+            // now we can push that UTF-8 (efficiently) converted into a string into DuckDB <TO BE DONE>
 
             total_files += 1;
 
@@ -100,7 +113,13 @@ pub fn scan_volume() -> anyhow::Result<()> {
 
     }
     unsafe {CloseHandle(handle)?};
-    println!("Processed {} files.", total_files);
+    let duration = start_time.elapsed(); // Stop the timer
+    let files_per_sec = total_files as f64 / duration.as_secs_f64();
+
+    println!("--- Scan Complete ---");
+    println!("Total Files:    {}", total_files);
+    println!("Time Elapsed:   {:.2?}", duration);
+    println!("Throughput:     {:.0} files/sec", files_per_sec);
 
     Ok(())
 }
