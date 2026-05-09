@@ -2,12 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod engine;
-use crate::engine::scanner::open_volume_handle;
+use crate::engine::scanner::scan_volume;
 
 fn main() {
     // --- TEST BLOCK ---
     println!("--- Testing System Privileges ---");
-    match open_volume_handle() {
+    match scan_volume() {
         Ok(handle) => println!("SUCCESS: Got handle {:?}", handle),
         Err(e) => println!("FAILURE: {}", e),
     }

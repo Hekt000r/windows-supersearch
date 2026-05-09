@@ -4872,6 +4872,7 @@ dependencies = [
 name = "windows-supersearch"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "embed-resource",
  "serde",
  "serde_json",
@@ -4879,6 +4880,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "windows 0.62.2",
+ "zerocopy",
 ]
 
 [[package]]
