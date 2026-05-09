@@ -34,4 +34,5 @@ windows = { version = "0.62.2", features = [
 ] }
 zerocopy = { version = "0.8.48", features = ["derive"] }
 anyhow = "1.0.102"
+duckdb = {version = "1.10502.0",features = ["bundled"] }
 

@@ -11,9 +11,18 @@ use windows::Win32::System::Ioctl::{
 use windows::Win32::System::IO::DeviceIoControl;
 use std::time::Instant;
 
+use crate::engine::db_setup::setup_db;
+use duckdb::{params, Connection};
+
 const HANDLE_PATH: PCWSTR = windows::core::w!("\\\\.\\C:"); // \\.\C:
 
 pub fn scan_volume() -> anyhow::Result<()> {
+    let conn = Connection::open("search_index.db")?;
+    setup_db(&conn)?;
+
+    let mut appender = conn.appender("files")?;
+
+
     let handle = unsafe {
         CreateFileW(
             HANDLE_PATH,
@@ -99,12 +108,13 @@ pub fn scan_volume() -> anyhow::Result<()> {
             let name_slice: &[u16] = unsafe { std::slice::from_raw_parts(name_ptr, name_len / 2) };
 
             utf8_buffer.clear();
-/* 
+
             for result in std::char::decode_utf16(name_slice.iter().cloned()) {
                 utf8_buffer.push(result.unwrap_or(std::char::REPLACEMENT_CHARACTER));
             }
-*/
-            // now we can push that UTF-8 (efficiently) converted into a string into DuckDB <TO BE DONE>
+
+            // now we can push that UTF-8 (efficiently) converted into a string into DuckDB:
+            appender.append_row(params![file_id, parent_id, &utf8_buffer])?;
 
             total_files += 1;
 
@@ -115,6 +125,8 @@ pub fn scan_volume() -> anyhow::Result<()> {
     unsafe {CloseHandle(handle)?};
     let duration = start_time.elapsed(); // Stop the timer
     let files_per_sec = total_files as f64 / duration.as_secs_f64();
+
+    appender.flush()?;
 
     println!("--- Scan Complete ---");
     println!("Total Files:    {}", total_files);

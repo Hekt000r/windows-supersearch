@@ -3,10 +3,10 @@
 
 mod engine;
 use crate::engine::scanner::scan_volume;
+use crate::engine::db_setup::setup_db;
 
 fn main() {
-    // --- TEST BLOCK ---
-    println!("--- Testing System Privileges ---");
+    println!("--- Running inital scan ---");
     match scan_volume() {
         Ok(handle) => println!("SUCCESS: Got handle {:?}", handle),
         Err(e) => println!("FAILURE: {}", e),
