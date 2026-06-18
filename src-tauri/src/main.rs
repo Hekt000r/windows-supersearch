@@ -2,12 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod engine;
-use crate::engine::scanner::scan_volume;
-use crate::engine::db_setup::setup_db;
+use crate::engine::advanced_scanner::open_volume_handle;
 
 fn main() {
     println!("--- Running inital scan ---");
-    match scan_volume() {
+    match open_volume_handle() {
         Ok(handle) => println!("SUCCESS: Got handle {:?}", handle),
         Err(e) => println!("FAILURE: {}", e),
     }
