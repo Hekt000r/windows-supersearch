@@ -1,7 +1,18 @@
-# Tauri + Solid + Typescript
+# Supersearch
+NOTE: currently early in development, not usable yet but usable version is soon.
 
-This template should help get you started developing with Tauri, Solid and Typescript in Vite.
+Windows Supersearch is a tool that lets you search for files on your entire computer instantly.
+It has a beautiful UI designed to look and feel like MacOS's Spotlight.
 
-## Recommended IDE Setup
+Why? Tools like Everything by voidtools exists but it's UI is outdated and impractical, and not open-source.
+Windows alternatives for Spotlight exist but they are all too slow.
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+How? While other Spotlight alternatives typically use FindFirstFile which is an API
+provided by Microsoft to search files, it goes through several system layers,
+has to take in account for permissions, security attributes, compression attributes, and a lot more.
+Supersearch bypasses this by reading the MFT (Master File Table) which is essentially just a 
+massive list of every file on disk and some of its metadata like the filename.
+
+## Technical Details
+This project uses Tauri. The scanner is written in Rust using nothing but win32 APIs via the win32 crate.
+The frontend UI is written with Solid + TailwindCSS
