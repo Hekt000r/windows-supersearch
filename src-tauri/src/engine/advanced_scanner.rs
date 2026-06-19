@@ -1,8 +1,11 @@
+use crate::engine::sqlite::{build_fts_index, decode_and_insert, init_database};
+use std::char::decode_utf16;
 use std::mem;
+use std::time::Instant;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GENERIC_READ, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, SetFilePointerEx, FILE_CURRENT, FILE_FLAGS_AND_ATTRIBUTES,
+    CreateFileW, ReadFile, SetFilePointerEx, FILE_BEGIN, FILE_CURRENT, FILE_FLAGS_AND_ATTRIBUTES,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
@@ -57,20 +60,19 @@ fn read_filename_attribute(data: &[u8], content_offset: u32) {
 
     let fn_length_chars: usize = data[len_pos] as usize;
     let fn_length_bytes: usize = fn_length_chars * 2; // length in chars -> length in bytes, 1 UTF char = 2 bytes
-    println!("Filename length: {}", fn_length_chars);
-    // now we can grab the filename itself which starts at 0x42 and ends at 0x42 + (2 bytes * L)
+                                                      // now we can grab the filename itself which starts at 0x42 and ends at 0x42 + (2 bytes * L)
     let name_pos = offset + 0x42;
     let name_end = name_pos + fn_length_bytes;
     let fn_bytes = &data[name_pos..name_end];
     // turn the raw bytes into utf16 units (1 utf16 unit = 2 bytes)
-    let utf16_units: Vec<u16> = fn_bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect();
-
-    // utf16 -> rust string
-    let filename = String::from_utf16_lossy(&utf16_units);
-    println!("Found filename: {}", filename)
+    //  a little bit of magic to optimize performance
+    let filename: String = decode_utf16(
+        fn_bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])),
+    )
+    .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+    .collect();
 }
 
 fn get_filename_attribute(data: &[u8], start_offset: u32) {
@@ -84,7 +86,6 @@ fn get_filename_attribute(data: &[u8], start_offset: u32) {
             0xFFFFFFFF => break,
             0x30 => {
                 let body_offset = current_offset + header.content_offset as usize;
-                println!("    Found $FILE_NAME at offset {}", current_offset);
                 read_filename_attribute(data, body_offset as u32);
             }
             _ => (), // ignore other attribs
@@ -109,7 +110,7 @@ fn read_le_u64(bytes: &[u8]) -> u64 {
 
 fn read_le_i64(bytes: &[u8]) -> i64 {
     let unsigned = read_le_u64(bytes); // First, read as unsigned
-    
+
     // Check if the highest bit of the highest byte is set (sign bit)
     let last_byte = bytes.last().unwrap_or(&0);
     if (last_byte & 0x80) != 0 {
@@ -124,7 +125,7 @@ fn read_le_i64(bytes: &[u8]) -> i64 {
 }
 
 // recieves runs list bytes, returns pairs of (lcn,length)
-fn parse_data_runs(run_list: &[u8]) -> Vec<(u64,u64)> {
+fn parse_data_runs(run_list: &[u8]) -> Vec<(u64, u64)> {
     // we recieve run_bytes which is a list of bytes of the entire dataruns list
     let mut runs = Vec::new();
     let mut current_lcn: u64 = 0u64; // current logical cluster number, the physical cluster on the disk
@@ -134,7 +135,8 @@ fn parse_data_runs(run_list: &[u8]) -> Vec<(u64,u64)> {
         let header_byte = run_list[pos]; // the header byte is the first byte of the entry (1 entry = 2 bytes)
         pos += 1;
 
-        if header_byte == 0x00 { // 0x00 means end of list
+        if header_byte == 0x00 {
+            // 0x00 means end of list
             break;
         }
 
@@ -142,12 +144,12 @@ fn parse_data_runs(run_list: &[u8]) -> Vec<(u64,u64)> {
         // high nibble contains the number of bytes used for the Offset field
         // low nibble contains the number of bytes used for the Length field
         // then there is the length field and offset field, whose size is contained in the header byte
-        let length_bytes = (header_byte >> 4) as usize; // shift 4 bits so the last 4 bits are pushed off and u get the first 4 bits only
-        let offset_bytes = (header_byte & 0x0F) as usize; // use a mask to grab the last nibble so last 4 bits
+        let length_bytes = (header_byte & 0x0F) as usize; // shift 4 bits so the last 4 bits are pushed off and u get the first 4 bits only
+        let offset_bytes = (header_byte >> 4) as usize; // use a mask to grab the last nibble so last 4 bits
 
         // read the length, positive integer so unsigned
-        let length = read_le_u64(&run_list[pos..pos + length_bytes]); // read le bytes from 
-        // ^^ start of length attribute to end of it (pos+length_bytes)
+        let length = read_le_u64(&run_list[pos..pos + length_bytes]); // read le bytes from
+                                                                      // ^^ start of length attribute to end of it (pos+length_bytes)
         pos += length_bytes;
 
         let offset = read_le_i64(&run_list[pos..pos + offset_bytes]);
@@ -160,39 +162,72 @@ fn parse_data_runs(run_list: &[u8]) -> Vec<(u64,u64)> {
             current_lcn -= offset.abs() as u64;
         }
 
-        runs.push((current_lcn,length)); // add a data run start and length to the pair
-
+        runs.push((current_lcn, length)); // add a data run start and length to the pair
     }
 
-    runs 
+    runs
 }
 
-/** takes the $MFT entry and returns data runs of the MFT */ 
-fn parse_mft_data_attribute(data: &[u8],start:usize,end:usize) -> Vec<(u64,u64)> {
-    // we are given data which is the entire MFT entry
-    // we need to grab the DATA attribute which is at start, and finishes at END
-    // data_bytes is the entire $DATA attribute
-    let data_bytes: &[u8] = &data[start..end];
+/** takes the $MFT entry and returns data runs of the MFT */
+fn parse_mft_data_attribute(data: &[u8], start: usize, end: usize) -> Vec<(u64, u64)> {
+    let data_bytes = &data[start..end];
+
+    // Read the run list offset from the non-resident header (offset 0x20)
+    let run_list_offset = u16::from_le_bytes([data_bytes[0x20], data_bytes[0x21]]) as usize;
+
+    // The run list starts at that offset from the beginning of the attribute
+    let run_list_bytes = &data_bytes[run_list_offset..];
+
+    println!("=== RUN LIST RAW BYTES ===");
+    println!("Length: {} bytes", run_list_bytes.len());
+    for (i, byte) in run_list_bytes.iter().enumerate().take(32) {
+        print!("{:02X} ", byte);
+        if (i + 1) % 16 == 0 {
+            println!();
+        }
+    }
+    println!("...");
+
+    parse_data_runs(run_list_bytes)
+}
+
+// Add this helper function (replaces extract_raw_filename)
+fn extract_filename_from_record(record: &[u8]) -> Option<Vec<u8>> {
+    // 1. Get the start of the first attribute from the record header
+    let mut offset = u16::from_le_bytes([record[0x14], record[0x15]]) as usize;
+
+    while offset + size_of::<AttributeHeader>() <= record.len() {
+        let header = unsafe { &*(record.as_ptr().add(offset) as *const AttributeHeader) };
+
+        // Check if this is the $FILE_NAME attribute (type 0x30)
+        if header.type_id == 0x30 {
+            // 2. Calculate the body offset (header + content_offset)
+            let body_offset = offset + header.content_offset as usize;
+            
+            // 3. Extract the filename from the body
+            let len_pos = body_offset + 0x40;
+            let name_pos = body_offset + 0x42;
+            let len_chars = record[len_pos] as usize;
+            
+            if len_chars == 0 {
+                return None;
+            }
+            
+            let len_bytes = len_chars * 2;
+            let name_end = name_pos + len_bytes;
+            return Some(record[name_pos..name_end].to_vec());
+        }
+
+        // Stop if we hit the end marker or an invalid length
+        if header.type_id == 0xFFFFFFFF || header.length == 0 {
+            break;
+        }
+
+        // Move to the next attribute
+        offset += header.length as usize;
+    }
     
-    // now cast the data attribute to a AttributeHeader
-    let header = unsafe {
-        &*(data_bytes.as_ptr() as *const AttributeHeader)
-    };
-
-    // assume resident since this is only for the MFT
-    // run_list is the list of data runs
-    // run list starts at content_offset bytes
-    let run_list_start: usize = header.content_offset as usize;
-    let run_list_end: usize = data_bytes.len(); // end of the attribute
-
-    // grab the run list bytes
-    // the run list is the actual content of the attribute, so a slice of the entire attribute
-    let run_list_bytes = &data_bytes[run_list_start..run_list_end];
-
-    // parse the data runs
-    let data_runs = parse_data_runs(run_list_bytes);
-    data_runs
-
+    None
 }
 
 // only for $MFT
@@ -200,7 +235,7 @@ fn get_data_attribute(data: &[u8], start_offset: u32) -> Option<usize> {
     let mut current_offset = start_offset as usize;
     while current_offset + size_of::<AttributeHeader>() <= data.len() {
         let header = unsafe { &*(data.as_ptr().add(current_offset) as *const AttributeHeader) };
-
+        let typeid = header.type_id;
         match header.type_id {
             0xFFFFFFFF => break, // End of attributes
             0x80 => {
@@ -210,18 +245,24 @@ fn get_data_attribute(data: &[u8], start_offset: u32) -> Option<usize> {
             _ => {}
         }
 
-        if header.length == 0 { break; }
+        if header.length == 0 {
+            break;
+        }
         current_offset += header.length as usize;
     }
     None
 }
 
-fn parse_mft(data: &[u8]) -> Vec<(u64,u64)> {
+fn parse_mft(data: &[u8]) -> Vec<(u64, u64)> {
     // attributes start at 0x30 in $MFT record
-    const ATTRS_START: u32 = 0x30;
+    let attrs_start = u16::from_le_bytes([data[0x14], data[0x15]]) as u32;
+    println!(
+        "First attribute offset: 0x{:X} ({} bytes)",
+        attrs_start, attrs_start
+    );
 
     // find $data attribute
-    let attr_start = match get_data_attribute(data, ATTRS_START) {
+    let attr_start = match get_data_attribute(data, attrs_start) {
         Some(start) => start,
         None => {
             eprintln!("ERROR: $DATA attribute not found in $MFT entry");
@@ -230,9 +271,7 @@ fn parse_mft(data: &[u8]) -> Vec<(u64,u64)> {
     };
 
     // read attribute header to get total length
-    let header = unsafe {
-        &*(data.as_ptr().add(attr_start) as *const AttributeHeader)
-    };
+    let header = unsafe { &*(data.as_ptr().add(attr_start) as *const AttributeHeader) };
 
     if header.non_resident != 1 {
         eprintln!("ERROR: $MFT $DATA attribute is resident (unexpected)");
@@ -300,69 +339,131 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
         "Drive Handle pointing to start of MFT. Beginning read loop for {} entries.",
         NUM_ENTRIES_TO_SCAN
     );
-    // old code
-    for entry_index in 0..NUM_ENTRIES_TO_SCAN {
-        let mut read_data_buffer: Vec<u8> = vec![0u8; mft_entry_size as usize];
-        let mut bytes_read: u32 = 0;
 
-        // Each ReadFile call advances the file pointer by however many bytes
-        // were read, so as long as mft_entry_size is correct, the pointer
-        // will already be positioned at the start of the next record after
-        // each successful read — no extra seeking needed between iterations.
-        let read_result = unsafe {
-            ReadFile(
-                drive_handle,
-                Some(&mut read_data_buffer[..]),
-                Some(&mut bytes_read as *mut u32),
-                None,
-            )
-        };
-
-        if let Err(e) = read_result {
-            println!("ReadFile failed on entry {}: {}", entry_index, e);
-            break;
-        }
-
-        if bytes_read < mft_entry_size {
-            println!(
-                "Entry {}: short read ({} of {} bytes) - stopping.",
-                entry_index, bytes_read, mft_entry_size
-            );
-            break;
-        }
-
-        println!(
-            "Entry {}: read {} bytes. Parsing attributes ...",
-            entry_index, bytes_read
-        );
-
-        let header: &AttributeHeader =
-            unsafe { &*(read_data_buffer.as_ptr() as *const AttributeHeader) };
-
-        let content_offset = header.content_offset as u32;
-        get_filename_attribute(&read_data_buffer, content_offset);
-    }
-    // new code
-    // setup
-    const CLUSTER_SIZE: usize = 4096; // bytes per disk cluster, usually 4kb
-    const RECORD_SIZE: usize = 1024; // bytes in size of a MFT entry, usually 1kb
-    const CHUNK_SIZE: usize = 1 * 1024 * 1024; // the chunk size which is how many bytes of the MFT at a time should be parsed
-    
     // we get the data runs from our helpers
     // read the first MFT entry, which is $MFT
     let mut mft_entry: Vec<u8> = vec![0u8; mft_entry_size as usize];
     let mut bytes_read: u32 = 0;
     unsafe {
         ReadFile(
-        drive_handle,
-        Some(&mut mft_entry[..]),
-        Some(&mut bytes_read as *mut u32),
-        None,
-    )
+            drive_handle,
+            Some(&mut mft_entry[..]),
+            Some(&mut bytes_read as *mut u32),
+            None,
+        )
     }
     .map_err(|e| format!("ReadFile Failed: {}", e))?;
+    if &mft_entry[0..4] == b"FILE" {
+        println!("Entry 0 is a valid FILE record");
+    } else {
+        println!("Entry 0 signature: {:02X?}", &mft_entry[0..4]);
+        return Err("Not a valid MFT record".to_string());
+    }
     let data_runs = parse_mft(&mft_entry);
+    println!("Parsed data runs:");
+    for (i, (lcn, length)) in data_runs.iter().enumerate() {
+        println!("  Run {}: LCN={}, Length={}", i, lcn, length);
+    }
 
+    // ==== BENCHMARKING
+    let start_time = Instant::now();
+    let mut total_entries: u64 = 0;
+    let mut total_files: u64 = 0;
+    let mut total_bytes_read: u64 = 0;
+
+    // setup
+    const CLUSTER_SIZE: usize = 4096; // bytes per disk cluster, usually 4kb
+    let record_size: usize = mft_entry_size as usize; // bytes in size of a MFT entry, usually 1kb
+    let chunk_size: usize = 16 * 1024 * 1024; // the chunk size which is how many bytes of the MFT at a time should be parsed
+    let bytes_per_cluster = volume_data.BytesPerCluster as u64;
+
+    // track current entry number
+    let mut entry_number: u64 = 0u64;
+
+    let mut filenames_buffer: Vec<(u64, Vec<u8>)> = Vec::with_capacity(total_entries as usize);
+
+    // loop over each data run
+    for (run_index, (lcn, length)) in data_runs.iter().enumerate() {
+        let run_start_byte = lcn * bytes_per_cluster;
+        let run_total_bytes = length * bytes_per_cluster;
+        // benchmarking
+        total_bytes_read += run_total_bytes;
+
+        println!(
+            "Processing run {}: {} clusters ({} bytes)",
+            run_index, length, run_total_bytes
+        );
+
+        let mut bytes_remaining = run_total_bytes;
+        let mut current_byte = run_start_byte;
+
+        // physically seek the disk to location ONCE AT THE START OF THE RUN
+        unsafe { SetFilePointerEx(drive_handle, run_start_byte as i64, None, FILE_BEGIN) }
+            .map_err(|e| format!("Seek failed: {}", e))?;
+
+        while bytes_remaining > 0 {
+            let read_size = std::cmp::min(chunk_size, bytes_remaining as usize);
+
+            // read the chunk into a buffer
+            let mut buffer = vec![0u8; read_size];
+            let mut bytes_read = 0u32;
+            unsafe {
+                ReadFile(
+                    drive_handle,
+                    Some(&mut buffer[..]),
+                    Some(&mut bytes_read as *mut u32),
+                    None,
+                )
+            }
+            .map_err(|e| format!("Read failed: {}", e))?;
+
+            for record_chunk in buffer.chunks_exact(record_size) {
+                // make sure its a valid FILE record
+                if &record_chunk[0..4] == b"FILE" {
+                    total_files += 1;
+                    let attrs_start =
+                        u16::from_le_bytes([record_chunk[0x14], record_chunk[0x15]]) as u32;
+                    if let Some(raw) = extract_filename_from_record(record_chunk) {
+                        filenames_buffer.push((entry_number, raw));
+                    }
+                }
+                total_entries += 1;
+                entry_number += 1;
+            }
+
+            bytes_remaining -= read_size as u64;
+            current_byte += read_size as u64;
+        }
+    }
+
+    // take the raw utf bytes and turn them into strings then dump them into db
+    let mut conn = init_database().map_err(|e| format!("DB init failed: {}", e))?;
+    decode_and_insert(filenames_buffer, &mut conn).map_err(|e| format!("DB insert failed: {}", e))?;
+    build_fts_index(&mut conn).map_err(|e| format!("FTS index build failed: {}", e))?;
+
+    let elapsed = start_time.elapsed();
+    let secs = elapsed.as_secs_f64();
+
+    println!("\n========== SCAN COMPLETE ==========");
+    println!("Total MFT entries processed: {}", total_entries);
+    println!("Valid FILE records:           {}", total_files);
+    println!(
+        "Total bytes read:             {} MB",
+        total_bytes_read / (1024 * 1024)
+    );
+    println!("Time taken:                   {:.3} seconds", secs);
+
+    if secs > 0.0 {
+        println!(
+            "Files per second:            {:.0}",
+            total_files as f64 / secs
+        );
+        println!(
+            "Throughput:                  {:.2} MB/s",
+            (total_bytes_read as f64 / 1024.0 / 1024.0) / secs
+        );
+    }
+    println!("===================================");
 
     Ok(drive_handle)
 }
