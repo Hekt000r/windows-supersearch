@@ -1,4 +1,4 @@
-use crate::engine::sqlite::{build_fts_index, decode_and_insert, init_database};
+use crate::engine::sqlite::{ decode_and_insert, init_database};
 use std::char::decode_utf16;
 use std::mem;
 use std::time::Instant;
@@ -193,43 +193,35 @@ fn parse_mft_data_attribute(data: &[u8], start: usize, end: usize) -> Vec<(u64, 
 
 // Add this helper function (replaces extract_raw_filename)
 fn extract_filename_from_record(record: &[u8]) -> Option<Vec<u8>> {
-    // 1. Get the start of the first attribute from the record header
     let mut offset = u16::from_le_bytes([record[0x14], record[0x15]]) as usize;
 
     while offset + size_of::<AttributeHeader>() <= record.len() {
         let header = unsafe { &*(record.as_ptr().add(offset) as *const AttributeHeader) };
 
-        // Check if this is the $FILE_NAME attribute (type 0x30)
         if header.type_id == 0x30 {
-            // 2. Calculate the body offset (header + content_offset)
             let body_offset = offset + header.content_offset as usize;
-            
-            // 3. Extract the filename from the body
-            let len_pos = body_offset + 0x40;
-            let name_pos = body_offset + 0x42;
-            let len_chars = record[len_pos] as usize;
-            
-            if len_chars == 0 {
-                return None;
+            let namespace = record[body_offset + 0x41];
+            // any namespace except DOS (3 = POSIX)
+            if namespace != 2 {
+                let len_pos = body_offset + 0x40;
+                let name_pos = body_offset + 0x42;
+                let len_chars = record[len_pos] as usize;
+                if len_chars == 0 {
+                    return None;
+                }
+                let len_bytes = len_chars * 2;
+                let name_end = name_pos + len_bytes;
+                return Some(record[name_pos..name_end].to_vec());
             }
-            
-            let len_bytes = len_chars * 2;
-            let name_end = name_pos + len_bytes;
-            return Some(record[name_pos..name_end].to_vec());
         }
 
-        // Stop if we hit the end marker or an invalid length
         if header.type_id == 0xFFFFFFFF || header.length == 0 {
             break;
         }
-
-        // Move to the next attribute
         offset += header.length as usize;
     }
-    
     None
 }
-
 // only for $MFT
 fn get_data_attribute(data: &[u8], start_offset: u32) -> Option<usize> {
     let mut current_offset = start_offset as usize;
@@ -439,7 +431,6 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
     // take the raw utf bytes and turn them into strings then dump them into db
     let mut conn = init_database().map_err(|e| format!("DB init failed: {}", e))?;
     decode_and_insert(filenames_buffer, &mut conn).map_err(|e| format!("DB insert failed: {}", e))?;
-    build_fts_index(&mut conn).map_err(|e| format!("FTS index build failed: {}", e))?;
 
     let elapsed = start_time.elapsed();
     let secs = elapsed.as_secs_f64();

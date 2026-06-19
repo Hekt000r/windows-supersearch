@@ -20,11 +20,7 @@ pub fn init_database() -> SqliteResult<Connection> {
         [],
     )?;
 
-    conn.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(name)",
-        [],
-    )?;
-
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON files(name)", [])?;
     Ok(conn)
 }
 
@@ -74,22 +70,5 @@ pub fn decode_and_insert(
     tx.commit()?;
 
     println!("Insert complete!");
-    Ok(())
-}
-
-pub fn build_fts_index(conn: &mut Connection) -> SqliteResult<()> {
-    println!("Building full‑text index...");
-    let tx = conn.transaction()?;
-    
-    // Insert all names into the FTS table, linking by rowid (which matches mft_entry)
-    // Since we used mft_entry as the primary key, and FTS5 uses rowid,
-    // we can copy the data directly.
-    tx.execute(
-        "INSERT INTO files_fts (rowid, name) SELECT mft_entry, name FROM files",
-        [],
-    )?;
-    
-    tx.commit()?;
-    println!("Full‑text index built.");
     Ok(())
 }

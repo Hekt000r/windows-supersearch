@@ -13,8 +13,14 @@
     "windows": [
       {
         "title": "windows-supersearch",
-        "width": 800,
-        "height": 600
+        "fullscreen": false,
+        "resizable": false,
+        "width": 600,
+        "height": 400,
+        "decorations": false,
+        "transparent": true,
+        "center": true,
+        "visible": false
       }
     ],
     "security": {
