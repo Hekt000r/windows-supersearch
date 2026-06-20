@@ -16,5 +16,5 @@ just reads the raw bytes of the MFT, it doesnt have to deal with all the permiss
 
 ## Technical Details
 This project uses Tauri. The scanner is written in Rust using nothing but win32 APIs via the win32 crate.
-MFT entries are dumped into SQLite database.
+MFT entries are dumped into SQLite (WAL MODE) database.
 The frontend UI is written with Solid + TailwindCSS
