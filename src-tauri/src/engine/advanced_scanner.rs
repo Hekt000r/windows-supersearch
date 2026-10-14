@@ -124,48 +124,46 @@ fn read_le_i64(bytes: &[u8]) -> i64 {
     }
 }
 
-// recieves runs list bytes, returns pairs of (lcn,length)
-fn parse_data_runs(run_list: &[u8]) -> Vec<(u64, u64)> {
+/** input raw bytes of data run list, outputs structured (lcn,length) pairs*/
+fn parse_data_runs(run_list_raw: &[u8]) -> Vec<(u64, u64)> {
     // we recieve run_bytes which is a list of bytes of the entire dataruns list
-    let mut runs = Vec::new();
-    let mut current_lcn: u64 = 0u64; // current logical cluster number, the physical cluster on the disk
-    let mut pos: usize = 0; // current byte position
+    let mut output_runs = Vec::new();
+    let mut lcn_cursor: u64 = 0u64; // current logical cluster number, the physical cluster on the disk
+    let mut byte_cursor: usize = 0; // current byte position
 
-    while pos < run_list.len() {
-        let header_byte = run_list[pos]; // the header byte is the first byte of the entry (1 entry = 2 bytes)
-        pos += 1;
+    while byte_cursor < run_list_raw.len() {
+        let header_byte = run_list_raw[byte_cursor]; // read the header, at offset 0x00 (first byte)
+        byte_cursor += 1; // since we already read 0x00 we move up to 0x01
 
         if header_byte == 0x00 {
             // 0x00 means end of list
             break;
         }
 
-        // the header byte contains two values, split into 2 nibbles
-        // high nibble contains the number of bytes used for the Offset field
-        // low nibble contains the number of bytes used for the Length field
-        // then there is the length field and offset field, whose size is contained in the header byte
-        let length_bytes = (header_byte & 0x0F) as usize; // shift 4 bits so the last 4 bits are pushed off and u get the first 4 bits only
-        let offset_bytes = (header_byte >> 4) as usize; // use a mask to grab the last nibble so last 4 bits
+        // header:
+        // low nibble gives us the number of bytes used for the Length field
+        // high nibble gives us the number of bytes used for the Offset field
+        let length_field_size = (header_byte & 0x0F) as usize; // use a mask to grab the last nibble so last 4 bits
+        let offset_field_size = (header_byte >> 4) as usize; // shift 4 bits so the last 4 bits are pushed off and u get the first 4 bits only
 
-        // read the length, positive integer so unsigned
-        let length = read_le_u64(&run_list[pos..pos + length_bytes]); // read le bytes from
-                                                                      // ^^ start of length attribute to end of it (pos+length_bytes)
-        pos += length_bytes;
+        // read the length field  
+        let length_field: u64 = read_le_u64(&run_list_raw[byte_cursor..byte_cursor + length_field_size]); 
+        byte_cursor += length_field_size; // we just read the bytes for the length field so mark them as read
 
-        let offset = read_le_i64(&run_list[pos..pos + offset_bytes]);
-        pos += offset_bytes;
+        let offset_field: i64 = read_le_i64(&run_list_raw[byte_cursor..byte_cursor + offset_field_size]);
+        byte_cursor += offset_field_size; //same here
 
         // get the LCN for this run
-        if offset > 0 {
-            current_lcn += offset as u64
+        if offset_field > 0 {
+            lcn_cursor += offset_field as u64 // if posirive jump forward
         } else {
-            current_lcn -= offset.abs() as u64;
+            lcn_cursor -= offset_field.abs() as u64; // if negative jump backward
         }
 
-        runs.push((current_lcn, length)); // add a data run start and length to the pair
+        output_runs.push((lcn_cursor, length_field)); // add a data run start and length to the pair
     }
 
-    runs
+    output_runs
 }
 
 /** takes the $MFT entry and returns data runs of the MFT */
@@ -265,6 +263,7 @@ fn parse_mft(data: &[u8]) -> Vec<(u64, u64)> {
     // read attribute header to get total length
     let header = unsafe { &*(data.as_ptr().add(attr_start) as *const AttributeHeader) };
 
+    // if YES resident
     if header.non_resident != 1 {
         eprintln!("ERROR: $MFT $DATA attribute is resident (unexpected)");
         return Vec::new();
@@ -354,7 +353,7 @@ pub fn open_volume_handle() -> Result<HANDLE, String> {
     let data_runs = parse_mft(&mft_entry);
     println!("Parsed data runs:");
     for (i, (lcn, length)) in data_runs.iter().enumerate() {
-        println!("  Run {}: LCN={}, Length={}", i, lcn, length);
+        println!("  Run {}: L   CN={}, Length={}", i, lcn, length);
     }
 
     // ==== BENCHMARKING
